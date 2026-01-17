@@ -1,147 +1,177 @@
-# Handles all M-Pesa STK Push logic (sandbox & production-ready structure)
+import os
 import base64
-import time
-import requests
+import json
 import re
 from datetime import datetime, timedelta
+import requests
 from requests.auth import HTTPBasicAuth
+from dotenv import load_dotenv
 
-from config import MPESA
-from logger import log
+# =========================
+# Load .env safely
+# =========================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+dotenv_path = os.path.join(BASE_DIR, "env", ".env")  # your chosen structure
 
-# Internal token cache
+if not os.path.exists(dotenv_path):
+    raise FileNotFoundError(f".env file not found at {dotenv_path}")
+
+load_dotenv(dotenv_path)
+
+# =========================
+# Credentials
+# =========================
+class MpesaC2bCredential:
+    consumer_key = os.getenv("MPESA_CONSUMER_KEY")
+    consumer_secret = os.getenv("MPESA_CONSUMER_SECRET")
+
+    oauth_url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
+    process_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
+    query_url = "https://sandbox.safaricom.co.ke/mpesa/stkpushquery/v1/query"
+
+
+class LipanaMpesaPassword:
+    business_short_code = os.getenv("MPESA_BUSINESS_SHORTCODE")
+    passkey = os.getenv("MPESA_PASSKEY")
+
+    @classmethod
+    def generate_password(cls):
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        data_to_encode = cls.business_short_code + cls.passkey + timestamp
+        encoded_password = base64.b64encode(data_to_encode.encode()).decode('utf-8')
+        return encoded_password, timestamp
+
+
+# =========================
+# Token cache
+# =========================
 _token_cache = {
     "token": None,
     "expiry": datetime.min
 }
 
+# =========================
+# Logger
+# =========================
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
-# Utilities
-def normalize_phone(phone: str) -> str | None:
-    """
-    Converts 07xxxxxxxx / 01xxxxxxxx to 2547xxxxxxxx / 2541xxxxxxxx
-    Returns None if invalid
-    """
+
+# =========================
+# Helpers
+# =========================
+def normalize_phone(phone):
     phone = phone.strip()
-    if phone.startswith("07") or phone.startswith("01"):
+    if phone.startswith("+"):
+        phone = phone[1:]
+    if phone.startswith("0"):
         phone = "254" + phone[1:]
-
-    if re.fullmatch(r"254[17]\d{8}", phone):
+    if re.match(r"^2547\d{8}$", phone):
         return phone
-    return None
+    raise ValueError("Invalid Safaricom phone number")
 
 
+# =========================
 # Access Token
-def get_access_token() -> str | None:
-    """
-    Fetches and caches OAuth token from Safaricom
-    """
+# =========================
+def get_access_token():
     now = datetime.now()
 
-    if _token_cache["token"] and now < _token_cache["expiry"]:
+    if _token_cache["token"] and now < _token_cache["expiry"] - timedelta(seconds=10):
         return _token_cache["token"]
 
     try:
-        url = (
-            "https://sandbox.safaricom.co.ke/oauth/v1/generate"
-            "?grant_type=client_credentials"
-        )
-
-        response = requests.get(
-            url,
+        r = requests.get(
+            MpesaC2bCredential.oauth_url,
             auth=HTTPBasicAuth(
-                MPESA["consumer_key"],
-                MPESA["consumer_secret"]
+                MpesaC2bCredential.consumer_key,
+                MpesaC2bCredential.consumer_secret
             ),
             timeout=10
         )
-        response.raise_for_status()
+        r.raise_for_status()
 
-        data = response.json()
-        token = data["access_token"]
+        data = r.json()
+        token = data.get("access_token")
         expires_in = int(data.get("expires_in", 3600))
 
         _token_cache["token"] = token
-        _token_cache["expiry"] = now + timedelta(seconds=expires_in - 30)
+        _token_cache["expiry"] = now + timedelta(seconds=expires_in)
 
-        log("M-Pesa access token obtained")
+        log("Obtained new M-Pesa access token")
         return token
 
     except Exception as e:
-        log(f"[MPESA] Token error: {e}")
+        log(f"Error obtaining access token: {e}")
         return None
 
 
-# Password Generator
-def generate_password() -> tuple[str, str]:
-    """
-    Generates dynamic STK password + timestamp
-    """
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    raw = MPESA["shortcode"] + MPESA["passkey"] + timestamp
-    password = base64.b64encode(raw.encode()).decode()
-    return password, timestamp
+# =========================
+# STK Push
+# =========================
+def send_stk_push(phone, amount, callback_url=None):
+    if amount is None:
+        raise ValueError("Amount cannot be None")
 
+    phone = normalize_phone(phone)
+    amount = int(amount)
 
-# STK Push Initiation
-def initiate_stk_push(phone: str, amount: int) -> dict | None:
-    """
-    Sends STK Push request
-    Returns raw Safaricom response
-    """
     token = get_access_token()
     if not token:
-        return None
+        raise Exception("Failed to obtain access token")
 
-    password, timestamp = generate_password()
+    password, timestamp = LipanaMpesaPassword.generate_password()
+
+    if not callback_url:
+        callback_url = os.getenv("MPESA_CALLBACK_URL")
+
+    if not callback_url:
+        raise ValueError("MPESA_CALLBACK_URL not set in .env")
 
     payload = {
-        "BusinessShortCode": MPESA["shortcode"],
+        "BusinessShortCode": LipanaMpesaPassword.business_short_code,
         "Password": password,
         "Timestamp": timestamp,
         "TransactionType": "CustomerPayBillOnline",
-        "Amount": int(amount),
+        "Amount": amount,
         "PartyA": phone,
-        "PartyB": MPESA["shortcode"],
+        "PartyB": LipanaMpesaPassword.business_short_code,
         "PhoneNumber": phone,
-        "CallBackURL": "https://example.com/callback",
-        "AccountReference": "AutomatedPhotobooth",
-        "TransactionDesc": "360 Booth Session"
+        "CallBackURL": callback_url,
+        "AccountReference": "POOL_TABLE",
+        "TransactionDesc": "Pool Table Payment"
     }
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+    r = requests.post(
+        MpesaC2bCredential.process_url,
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30
+    )
+    r.raise_for_status()
+    res = r.json()
 
-    try:
-        response = requests.post(
-            "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
-            json=payload,
-            headers=headers,
-            timeout=10
-        )
-        data = response.json()
-        log(f"[MPESA] STK Push response: {data}")
-        return data
+    log(f"STK Push response:\n{json.dumps(res, indent=2)}")
 
-    except Exception as e:
-        log(f"[MPESA] STK push error: {e}")
-        return None
+    if res.get("ResponseCode") != "0":
+        raise Exception(res.get("ResponseDescription", "STK Push rejected"))
 
-# STK Query
-def query_stk_status(checkout_request_id: str) -> dict | None:
-    """
-    Queries payment status using CheckoutRequestID
-    """
+    return res.get("CheckoutRequestID")
+
+
+# =========================
+# Query payment status
+# =========================
+def query_mpesa_status(checkout_request_id):
     token = get_access_token()
     if not token:
-        return None
+        log("No access token available for STK query")
+        return False
 
-    password, timestamp = generate_password()
+    password, timestamp = LipanaMpesaPassword.generate_password()
 
     payload = {
-        "BusinessShortCode": MPESA["shortcode"],
+        "BusinessShortCode": LipanaMpesaPassword.business_short_code,
         "Password": password,
         "Timestamp": timestamp,
         "CheckoutRequestID": checkout_request_id
@@ -153,45 +183,101 @@ def query_stk_status(checkout_request_id: str) -> dict | None:
     }
 
     try:
-        response = requests.post(
-            "https://sandbox.safaricom.co.ke/mpesa/stkpushquery/v1/query",
+        r = requests.post(
+            MpesaC2bCredential.query_url,
             json=payload,
             headers=headers,
             timeout=10
         )
-        data = response.json()
-        log(f"[MPESA] STK Query: {data}")
-        return data
+        data = r.json()
+        log(json.dumps(data, indent=2))
+        return str(data.get("ResultCode")) == "0"
 
     except Exception as e:
-        log(f"[MPESA] STK query error: {e}")
-        return None
-
-
-
-# Blocking Payment Wait
-def wait_for_payment(checkout_request_id: str, timeout: int = 90) -> str:
+        log(f"STK query error: {e}")
+        return False
+def wait_for_payment(checkout_request_id, timeout=90, interval=5):
     """
-    Polls STK status until SUCCESS, FAILED, or TIMEOUT
-    Returns: SUCCESS | FAILED | TIMEOUT
+    Polls M-Pesa STK query API until payment resolves.
+
+    Returns:
+        dict {
+            status: SUCCESS | FAILED | CANCELLED | TIMEOUT | ERROR
+            result_code
+            result_desc
+        }
     """
-    start = time.time()
+    start_time = time.time()
 
-    while time.time() - start < timeout:
-        time.sleep(3)
+    while time.time() - start_time < timeout:
+        token = get_access_token()
+        if not token:
+            return {
+                "status": "ERROR",
+                "result_code": None,
+                "result_desc": "No access token"
+            }
 
-        result = query_stk_status(checkout_request_id)
-        if not result:
-            continue
+        password, timestamp = LipanaMpesaPassword.generate_password()
 
-        code = str(result.get("ResultCode"))
-        desc = result.get("ResultDesc", "")
+        payload = {
+            "BusinessShortCode": LipanaMpesaPassword.Business_short_code,
+            "Password": password,
+            "Timestamp": timestamp,
+            "CheckoutRequestID": checkout_request_id
+        }
 
-        if code == "0":
-            return "SUCCESS"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
 
-        if code not in ("", "None"):
-            log(f"[MPESA] Payment failed: {desc}")
-            return "FAILED"
+        try:
+            resp = requests.post(
+                MpesaC2bCredential.query_url,
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
 
-    return "TIMEOUT"
+            data = resp.json()
+            log(json.dumps(data, indent=2))
+
+            result_code = str(data.get("ResultCode"))
+            result_desc = data.get("ResultDesc")
+
+            # SUCCESS
+            if result_code == "0":
+                return {
+                    "status": "SUCCESS",
+                    "result_code": result_code,
+                    "result_desc": result_desc
+                }
+
+            # USER CANCELLED
+            if result_code == "1032":
+                return {
+                    "status": "CANCELLED",
+                    "result_code": result_code,
+                    "result_desc": result_desc
+                }
+
+            # FAILED (insufficient funds, etc.)
+            if result_code not in ("0", "1032"):
+                return {
+                    "status": "FAILED",
+                    "result_code": result_code,
+                    "result_desc": result_desc
+                }
+
+        except Exception as e:
+            log(f"STK query exception: {e}")
+
+        time.sleep(interval)
+
+    return {
+        "status": "TIMEOUT",
+        "result_code": None,
+        "result_desc": "Payment timeout"
+    }
+    
