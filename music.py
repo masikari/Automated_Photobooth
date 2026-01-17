@@ -1,5 +1,3 @@
-# Handles music search, preview, selection, and playback
-
 import os
 import subprocess
 import yt_dlp
@@ -12,95 +10,62 @@ pygame.mixer.init()
 
 _vlc_process = None
 
-
-# Search YouTube
-def search_music(query: str, limit: int = 5) -> list:
-    """
-    Returns a list of {title, url}
-    """
-    opts = {
-        "quiet": True,
-        "skip_download": True,
-        "default_search": f"ytsearch{limit}",
-        "format": "bestaudio/best",
-    }
-
-    with yt_dlp.YoutubeDL(opts) as ydl:
+# === YOUTUBE SEARCH / PREVIEW ===
+def search_youtube(query, max_results=5):
+    ydl_opts = {'quiet': True, 'skip_download': True, 'format': 'bestaudio/best', 'default_search': f'ytsearch{max_results}'}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(query, download=False)
-
     results = []
-    for entry in info.get("entries", []):
-        results.append({
-            "title": entry.get("title"),
-            "url": entry.get("webpage_url")
-        })
-
+    if 'entries' in info:
+        for entry in info['entries']:
+            results.append({'title': entry.get('title'), 'url': entry.get('webpage_url')})
     return results
 
-
-# Preview Song
-def preview_song(youtube_url: str):
-    """
-    Downloads short preview and plays via VLC
-    """
-    global _vlc_process
-
-    # Stop previous preview
-    if _vlc_process and _vlc_process.poll() is None:
-        _vlc_process.kill()
-
-    opts = {
-        "format": "bestaudio/best",
-        "outtmpl": PREVIEW_FILE,
-        "quiet": True,
-        "noplaylist": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "128",
-        }],
-    }
-
-    with yt_dlp.YoutubeDL(opts) as ydl:
+def preview_song(youtube_url):
+    ydl_opts = {"format": "bestaudio/best", "outtmpl": "preview_temp.%(ext)s",
+                "quiet": True, "noplaylist": True,
+                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}]}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([youtube_url])
+    subprocess.Popen(["vlc", "--play-and-exit", PREVIEW_FILE])
 
-    _vlc_process = subprocess.Popen(
-        ["vlc", "--play-and-exit", PREVIEW_FILE],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+def select_song(youtube_url):
+    if os.path.exists(PREVIEW_FILE):
+        shutil.copy(PREVIEW_FILE, SELECTED_FILE)
+        try:
+            os.remove(PREVIEW_FILE)
+        except: pass
+        log("Song selected from preview!")
+    else:
+        ydl_opts = {"format": "bestaudio/best", "outtmpl": "selected_song.%(ext)s",
+                    "quiet": True, "noplaylist": True,
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_url])
+        log("Song downloaded directly as selection.")
 
-    log("Music preview playing")
+def search_music(auto_start=False):
+    query = simpledialog.askstring("Search Music", "Enter song or artist:")
+    if not query: return
+    win = tk.Toplevel(root)
+    win.title("Music Results")
+    try:
+        videos = search_youtube(query, max_results=6)
+        for i, v in enumerate(videos):
+            title = v['title']
+            link = v['url']
+            tk.Label(win, text=title, wraplength=500, justify='left').grid(row=i, column=0, sticky='w')
+            tk.Button(win, text="Preview", command=lambda u=link: preview_song(u)).grid(row=i, column=1)
+            tk.Button(win, text="Select", command=lambda u=link: select_song(u)).grid(row=i, column=2)
+    except Exception as e:
+        messagebox.showerror("Search Error", str(e))
 
-# Select Song
-def select_song():
-    """
-    Moves preview to selected song (overwrite)
-    """
-    if not os.path.exists(PREVIEW_FILE):
-        log("No preview file to select")
-        return False
-
-    os.replace(PREVIEW_FILE, MUSIC_FILE)
-    log("Song selected successfully")
-    return True
-
-
-# Play Selected Song
+# SESSION
+pygame.mixer.init()
 def play_selected_song():
-    """
-    Plays selected song using pygame
-    """
-    if not os.path.exists(MUSIC_FILE):
-        log("No selected song found")
-        return False
-
-    pygame.mixer.music.load(MUSIC_FILE)
-    pygame.mixer.music.play()
-    log("Selected song playing")
-    return True
-
-
-# Stop Music
-def stop_music():
-    pygame.mixer.music.stop()
+    if os.path.exists(SELECTED_FILE):
+        pygame.mixer.music.load(SELECTED_FILE)
+        pygame.mixer.music.play()
+        log(" Playing selected song...")
+    else:
+        log("[ERR] No selected song available!")

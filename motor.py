@@ -9,47 +9,24 @@ from logger import log
 _ser = None
 _lock = Lock()
 
+#MOTOR (Bluetooth)
+SERIAL_PORT = '/dev/rfcomm0'
+SERIAL_BAUD = 9600
+ser = None
 
 def init_serial():
-    """
-    Initialize serial connection to motor
-    """
-    global _ser
+    global ser
     try:
-        _ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
-        time.sleep(2)  # allow connection to stabilize
-        log(f"✅ Serial motor connected on {SERIAL_PORT} @ {SERIAL_BAUD}")
+        ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
+        log(f"Serial opened on {SERIAL_PORT} @ {SERIAL_BAUD}")
     except Exception as e:
-        _ser = None
-        log(f"❌ Serial motor connection failed: {e}")
+        ser = None
+        log(f"Serial open error: {e}")
+init_serial()
 
-
-def send_motor_command(cmd: str):
-    """
-    Sends command to motor ('F'/'R'/'S')
-    """
-    global _ser
-    if cmd not in ("F", "R", "S"):
-        log(f"[Motor] Invalid command: {cmd}")
-        return
-
-    with _lock:
-        if _ser and _ser.is_open:
-            try:
-                _ser.write(cmd.encode())
-                log(f"[Motor] Command sent: {cmd}")
-            except Exception as e:
-                log(f"[Motor] Send error: {e}")
-        else:
-            log(f"[Motor] Serial not connected, command skipped: {cmd}")
-
-
-def close_serial():
-    """
-    Close serial safely
-    """
-    global _ser
-    with _lock:
-        if _ser and _ser.is_open:
-            _ser.close()
-            log("✅ Serial motor closed")
+def send_motor_command(cmd):
+    if ser and ser.is_open:
+        try: ser.write(cmd.encode()); log(f"Motor command sent: {cmd}")
+        except Exception as e: log(f"Motor send error: {e}")
+    else:
+        log(f"Motor command skipped (serial not connected): {cmd}")
