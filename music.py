@@ -9,11 +9,11 @@ from tkinter import simpledialog, messagebox
 
 pygame.mixer.init()
 
-# File paths
+#File paths
 PREVIEW_FILE = "preview_temp.mp3"
 SELECTED_FILE = "selected_song.mp3"
 
-# Logging will be handled via main.py
+#Logging will be handled via main.py
 log_callback = print  # default fallback
 
 def set_log_callback(callback):
@@ -26,7 +26,7 @@ def log(msg):
         log_callback(msg)
     print(msg)
 
-# --- YouTube search ---
+#YouTube search
 def search_youtube(query, max_results=5):
     ydl_opts = {
         'quiet': True,
@@ -42,28 +42,47 @@ def search_youtube(query, max_results=5):
             results.append({'title': entry.get('title'), 'url': entry.get('webpage_url')})
     return results
 
-# --- Preview song ---
-def preview_song(youtube_url):
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": PREVIEW_FILE,
-        "quiet": True,
-        "noplaylist": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "128"
-        }]
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([youtube_url])
+#Preview song
+def preview_song(video_url):
     try:
-        subprocess.Popen(["vlc", "--play-and-exit", PREVIEW_FILE])
         log("Previewing song...")
-    except Exception as e:
-        log(f"Failed to play preview: {e}")
 
-# --- Select song ---
+        preview_file = "preview_temp.mp3"
+
+        # Remove old preview
+        if os.path.exists(preview_file):
+            os.remove(preview_file)
+
+        ydl_opts = {
+            "format": "bestaudio",
+            "outtmpl": "preview_temp.%(ext)s",   # 🔑 REQUIRED
+            "quiet": True,
+            "noplaylist": True,
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }
+            ],
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+
+        if not os.path.exists(preview_file):
+            log("❌ Preview file not created")
+            return
+
+        subprocess.Popen(
+            ["vlc", "--play-and-exit", preview_file],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+    except Exception as e:
+        log(f"Preview error: {e}")
+#Select song
 def select_song(youtube_url):
     if os.path.exists(PREVIEW_FILE):
         shutil.copy(PREVIEW_FILE, SELECTED_FILE)
@@ -86,7 +105,7 @@ def select_song(youtube_url):
             ydl.download([youtube_url])
         log("Song downloaded directly as selection.")
 
-# --- Tkinter music search ---
+#Tkinter music search
 def search_music():
     root = tk.Tk()
     root.withdraw()  # hide root window for simpledialog
@@ -108,7 +127,7 @@ def search_music():
     except Exception as e:
         messagebox.showerror("Search Error", str(e))
 
-# --- Play/Stop selected song ---
+#Play/Stop selected song
 def play_selected_song():
     if os.path.exists(SELECTED_FILE):
         pygame.mixer.music.load(SELECTED_FILE)
