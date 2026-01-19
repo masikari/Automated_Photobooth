@@ -1,32 +1,54 @@
-import os
 import json
+import os
 import hashlib
+from datetime import datetime, timedelta
 
 SETTINGS_FILE = "settings.json"
+LOCK_TIME_MINUTES = 10
 
-DEFAULT_SETTINGS = {
-    "password": None,
-    "price": 50.0,
+settings = {
+    "price": 0,
     "till_number": "",
-    "record_time": 20,
+    "record_time": 10,
     "email": "",
-    "camera_type": "webcam"
+    "password": None,
+    "failed_attempts": 0,
+    "lock_until": None
 }
 
-settings = {}
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
 def load_settings():
     global settings
     if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r") as f:
-            settings = json.load(f)
-    else:
-        settings = DEFAULT_SETTINGS.copy()
-    return settings
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                settings.update(json.load(f))
+        except Exception:
+            pass
 
 def save_settings():
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=4)
 
-def hash_password(pw):
-    return hashlib.sha256(pw.encode()).hexdigest()
+def is_locked():
+    lock_until = settings.get("lock_until")
+    if lock_until:
+        return datetime.now() < datetime.fromisoformat(lock_until)
+    return False
+
+def register_failed_attempt():
+    settings["failed_attempts"] += 1
+
+    if settings["failed_attempts"] >= 3:
+        lock_time = datetime.now() + timedelta(minutes=LOCK_TIME_MINUTES)
+        settings["lock_until"] = lock_time.isoformat()
+        settings["failed_attempts"] = 0
+
+    save_settings()
+
+def reset_failed_attempts():
+    settings["failed_attempts"] = 0
+    settings["lock_until"] = None
+    save_settings()

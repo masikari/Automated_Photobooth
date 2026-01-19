@@ -3,12 +3,16 @@ import threading
 import tkinter as tk
 from tkinter import simpledialog, messagebox, scrolledtext
 import csv
-from settings import load_settings, save_settings, settings, hash_password
+from replay import replay_last_video
+import random
+import string
+from settings import (load_settings, save_settings, settings,hash_password, is_locked,register_failed_attempt, reset_failed_attempts)
 from logger import log, set_ui_callback
 from music import search_music
 from session import start_session
 from mpesa import initiate_mpesa_payment, is_valid_phone
 from motor import init_serial
+from webcam import open_camera_preview
 
 #INITIALIZATION
 load_settings()
@@ -35,6 +39,97 @@ def ui_log(msg):
 
 set_ui_callback(ui_log)
 
+def admin_login():
+    if settings.get("password") is None:
+        pw = simpledialog.askstring("Set Admin Password", "Create password:", show="*")
+        if not pw:
+            return
+        settings["password"] = hash_password(pw)
+        save_settings()
+        messagebox.showinfo("Saved", "Admin password set")
+        return
+
+    if is_locked():
+        messagebox.showerror("Locked", "Too many failed attempts.\nTry again later.")
+        return
+
+    pw = simpledialog.askstring("Admin Login", "Enter password:", show="*")
+    if not pw:
+        return
+
+    if hash_password(pw) == settings.get("password"):
+        reset_failed_attempts()
+        open_settings()
+    else:
+        register_failed_attempt()
+        messagebox.showerror("Denied", "Incorrect password")
+def change_password():
+    old = simpledialog.askstring("Change Password", "Old password:", show="*")
+    if not old:
+        return
+
+    if hash_password(old) != settings.get("password"):
+        messagebox.showerror("Error", "Incorrect old password")
+        return
+
+    new = simpledialog.askstring("Change Password", "New password:", show="*")
+    if not new:
+        return
+
+    settings["password"] = hash_password(new)
+    save_settings()
+    messagebox.showinfo("Success", "Password changed")
+
+def recover_password():
+    email = settings.get("email")
+    if not email:
+        messagebox.showerror("Error", "Admin email not set")
+        return
+
+    temp_pw = "".join(random.choices(string.ascii_letters + string.digits, k=8))
+    settings["password"] = hash_password(temp_pw)
+    reset_failed_attempts()
+    save_settings()
+
+    send_recovery_email(email, temp_pw)
+    messagebox.showinfo("Recovery", "Temporary password sent to email")
+    log("Password recovery email sent")
+
+def open_settings():
+    win = tk.Toplevel(root)
+    win.title("Admin Settings")
+
+    tk.Label(win, text="Amount per Session (KES)").grid(row=0, column=0)
+    e_price = tk.Entry(win)
+    e_price.insert(0, settings.get("price", 0))
+    e_price.grid(row=0, column=1)
+
+    tk.Label(win, text="Till Number").grid(row=1, column=0)
+    e_till = tk.Entry(win)
+    e_till.insert(0, settings.get("till_number", ""))
+    e_till.grid(row=1, column=1)
+
+    tk.Label(win, text="Recording Time (seconds)").grid(row=2, column=0)
+    e_time = tk.Entry(win)
+    e_time.insert(0, settings.get("record_time", 10))
+    e_time.grid(row=2, column=1)
+
+    tk.Label(win, text="Admin Email").grid(row=3, column=0)
+    e_email = tk.Entry(win)
+    e_email.insert(0, settings.get("email", ""))
+    e_email.grid(row=3, column=1)
+    
+    def save_and_close():
+        settings["price"] = float(e_price.get())
+        settings["till_number"] = e_till.get()
+        settings["record_time"] = int(e_time.get())
+        settings["email"] = e_email.get()
+        save_settings()
+        log("Settings updated")
+        win.destroy()
+
+    tk.Button(win, text="Save", command=save_and_close)\
+        .grid(row=4, column=0, columnspan=2, pady=10)    
 #CREATE SESSIONS CSV IF MISSING
 if not os.path.exists("sessions.csv"):
     with open("sessions.csv", "w", newline="") as f:
@@ -42,10 +137,7 @@ if not os.path.exists("sessions.csv"):
 
 #SESSION FLOW
 last_payment_phone = None
-
 def start_flow():
-    global last_payment_phone
-
     phone = simpledialog.askstring("Payment", "Enter phone (07... or 01...):")
     if not phone:
         return
@@ -59,89 +151,54 @@ def start_flow():
         return
 
     if not os.path.exists("selected_song.mp3"):
-        messagebox.showwarning("Missing", "Please select music first.")
+        messagebox.showwarning("Missing", "Select music first")
         return
 
     amount = settings.get("price", 0)
     log(f"Initiating payment for {phone} amount {amount}")
 
-    def payment_thread():
+    def pay():
         try:
-            success = initiate_mpesa_payment(phone, amount)
-            if success:
-                global last_payment_phone
-                last_payment_phone = phone
-                root.after(0, lambda: countdown_label.config(text="Payment confirmed. Starting soon..."))
+            if initiate_mpesa_payment(phone, amount):
                 threading.Thread(
                     target=lambda: start_session(root, countdown_label, phone),
                     daemon=True
                 ).start()
             else:
-                root.after(0, lambda: messagebox.showerror(
-                    "Payment Failed", "M-Pesa payment not confirmed."
-                ))
+                messagebox.showerror("Payment Failed", "Payment not confirmed")
         except Exception as e:
-            log(f"[ERROR] Payment thread exception: {e}")
+            log(f"[ERROR] Payment exception: {e}")
 
-    threading.Thread(target=payment_thread, daemon=True).start()
+    threading.Thread(target=pay, daemon=True).start()
 
-#ADMIN SETTINGS
-def admin_login():
-    if settings.get("password") is None:
-        pw = simpledialog.askstring("Set Password", "Create a password:", show="*")
-        if not pw:
-            return
-        settings["password"] = hash_password(pw)
-        save_settings()
-        messagebox.showinfo("Password Set", "Password saved.")
-        return
+#MENU BAR
 
-    pw = simpledialog.askstring("Admin Login", "Enter password:", show="*")
-    if not pw:
-        return
+menubar = tk.Menu(root)
+root.config(menu=menubar)
 
-    if hash_password(pw) == settings.get("password"):
-        open_settings()
-    else:
-        messagebox.showerror("Error", "Incorrect password")
+settings_menu = tk.Menu(menubar, tearoff=0)
+menubar.add_cascade(label="Settings", menu=settings_menu)
 
-def open_settings():
-    win = tk.Toplevel(root)
-    win.title("Owner Settings")
+settings_menu.add_command(label="Admin Settings", command=admin_login)
+settings_menu.add_command(label="Change Password", command=change_password)
+settings_menu.add_command(label="Recover Password", command=recover_password)
+settings_menu.add_separator()
+settings_menu.add_command(label="Exit", command=root.quit)
 
-    tk.Label(win, text="Price (KES)").grid(row=0, column=0)
-    entry_price = tk.Entry(win)
-    entry_price.insert(0, settings.get("price", 0))
-    entry_price.grid(row=0, column=1)
+#BUTTONS
 
-    tk.Label(win, text="Till Number").grid(row=1, column=0)
-    entry_till = tk.Entry(win)
-    entry_till.insert(0, settings.get("till_number", ""))
-    entry_till.grid(row=1, column=1)
+tk.Button(frame, text="Music", command=search_music)\
+    .grid(row=0, column=0, padx=5)
 
-    tk.Label(win, text="Recording Time (s)").grid(row=2, column=0)
-    entry_time = tk.Entry(win)
-    entry_time.insert(0, settings.get("record_time", 10))
-    entry_time.grid(row=2, column=1)
+tk.Button(frame, text="Start", command=start_flow)\
+    .grid(row=0, column=1, padx=5)
+    
+tk.Button(frame, text="Camera", command=lambda:
+    threading.Thread(target=open_camera_preview, daemon=True).start()
+).grid(row=0, column=2, padx=5)
 
-    def save_and_close():
-        try:
-            settings["price"] = float(entry_price.get())
-            settings["till_number"] = entry_till.get()
-            settings["record_time"] = int(entry_time.get())
-            save_settings()
-            win.destroy()
-            log("Settings saved")
-        except Exception as e:
-            messagebox.showerror("Save Error", str(e))
-
-    tk.Button(win, text="Save", command=save_and_close).grid(row=3, column=0, columnspan=2, pady=10)
-
-#UI BUTTONS
-tk.Button(frame, text="Search Music", command=search_music).grid(row=0, column=0, padx=5)
-tk.Button(frame, text="Start Session", command=start_flow).grid(row=0, column=1, padx=5)
-tk.Button(frame, text="Admin", command=admin_login).grid(row=0, column=2, padx=5)
-
-#START
+tk.Button(frame, text="Replay", command=replay_last_video)\
+    .grid(row=0, column=3, padx=5)
+# START
 log("System ready")
 root.mainloop()
