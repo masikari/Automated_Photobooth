@@ -3,10 +3,13 @@
     "till_number": "",
     "record_time": 30,
     "email": "masikariemmanuel@gmail.com",
-    "password": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    "email_password": "",
+    "admin_whatsapp": "",
+    "password": "7ffc240b257840ebba007bbb8790ef59f052bf001ec9ff9a1377af86f5046b8e",
     "failed_attempts": 0,
-    "lock_until": null,
+    "lock_until": 0,
     "camera_type": "webcam",
     "last_song_title": "",
-    "admin_email": ""
+    "admin_email": "",
+    "whatsapp_logged_in": false
 }

@@ -1,3 +1,4 @@
+# session.py
 import os
 import time
 import csv
@@ -6,6 +7,7 @@ import cv2
 import pygame
 import tkinter as tk
 from datetime import datetime
+import subprocess
 
 from settings import settings
 from logger import log
@@ -22,16 +24,30 @@ if face_cascade.empty():
 
 pygame.mixer.init()
 
-def start_session(root, countdown_label, phone_number):
+def convert_to_whatsapp_mp4(input_file):
+    """Convert OpenCV mp4 to WhatsApp-compatible mp4 using H264"""
+    output_file = input_file.replace(".mp4", "_wa.mp4")
+    subprocess.run([
+        "ffmpeg", "-y", "-i", input_file,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        output_file
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return output_file
+
+def start_session(root, countdown_label, phone_number, on_complete=None):
+    """
+    Starts a 360 booth session with countdown, recording, motor + music control.
+    Calls on_complete() after session finishes if provided.
+    """
     duration = int(settings.get("record_time", 10))
 
     def update_countdown(text):
         root.after(0, lambda: countdown_label.config(text=text))
 
-    def fullscreen_countdown(seconds, on_complete):
+    def fullscreen_countdown(seconds, callback):
         global countdown_window
 
-        # Destroy existing countdown if any
         if countdown_window is not None:
             try:
                 countdown_window.destroy()
@@ -61,7 +77,7 @@ def start_session(root, countdown_label, phone_number):
                 except:
                     pass
                 countdown_window = None
-                on_complete()
+                callback()
                 return
 
             label.config(text=str(t))
@@ -115,6 +131,11 @@ def start_session(root, countdown_label, phone_number):
 
         update_countdown("Done")
 
+        # Convert to WhatsApp-friendly mp4 but do not send automatically
+        wa_video = convert_to_whatsapp_mp4(path)
+        log(f"Session completed → {wa_video}")
+
+        # Log session
         with open(SESSIONS_CSV, "a", newline="") as f:
             csv.writer(f).writerow([
                 datetime.now().isoformat(),
@@ -123,6 +144,8 @@ def start_session(root, countdown_label, phone_number):
                 settings.get("price")
             ])
 
-        log(f"Session completed → {path}")
+        # Callback if provided
+        if on_complete:
+            on_complete()
 
     fullscreen_countdown(3, lambda: threading.Thread(target=record, daemon=True).start())

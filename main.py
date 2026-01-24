@@ -1,20 +1,31 @@
+# main.py
 import os
 import threading
 import tkinter as tk
 from tkinter import simpledialog, messagebox, scrolledtext
 import csv
-from replay import replay_last_video
 import random
 import string
-from settings import (load_settings, save_settings, settings,hash_password, is_locked,register_failed_attempt, reset_failed_attempts)
+import subprocess
+from settings import (
+    load_settings,
+    save_settings,
+    settings,
+    hash_password,
+    is_locked,
+    register_failed_attempt,
+    reset_failed_attempts
+)
 from logger import log, set_ui_callback
 from music import search_music
 from session import start_session
+from email_service import send_recovery_email, send_session_email
 from mpesa import initiate_mpesa_payment, is_valid_phone
 from motor import init_serial
 from webcam import open_camera_preview
+from share import share_via_whatsapp, login_whatsapp
 
-#INITIALIZATION
+# ======== INITIALIZATION ========
 load_settings()
 init_serial()
 
@@ -30,7 +41,7 @@ log_text.pack(pady=10)
 countdown_label = tk.Label(root, text="Waiting...", font=("Arial", 14))
 countdown_label.pack(pady=5)
 
-#LOGGER
+# ======== LOGGER ========
 def ui_log(msg):
     log_text.config(state="normal")
     log_text.insert(tk.END, msg + "\n")
@@ -39,6 +50,7 @@ def ui_log(msg):
 
 set_ui_callback(ui_log)
 
+# ======== ADMIN FUNCTIONS ========
 def admin_login():
     if settings.get("password") is None:
         pw = simpledialog.askstring("Set Admin Password", "Create password:", show="*")
@@ -63,6 +75,7 @@ def admin_login():
     else:
         register_failed_attempt()
         messagebox.showerror("Denied", "Incorrect password")
+
 def change_password():
     old = simpledialog.askstring("Change Password", "Old password:", show="*")
     if not old:
@@ -88,13 +101,19 @@ def recover_password():
 
     temp_pw = "".join(random.choices(string.ascii_letters + string.digits, k=8))
     settings["password"] = hash_password(temp_pw)
+    settings["lock_until"] = 0
     reset_failed_attempts()
     save_settings()
 
-    send_recovery_email(email, temp_pw)
-    messagebox.showinfo("Recovery", "Temporary password sent to email")
-    log("Password recovery email sent")
+    if send_recovery_email(email, temp_pw):
+        messagebox.showinfo("Success", "Temporary password sent to admin email")
+    else:
+        messagebox.showerror(
+            "Email Error",
+            "Failed to send email. Check developer SMTP settings."
+        )
 
+# ======== ADMIN SETTINGS GUI ========
 def open_settings():
     win = tk.Toplevel(root)
     win.title("Admin Settings")
@@ -118,25 +137,56 @@ def open_settings():
     e_email = tk.Entry(win)
     e_email.insert(0, settings.get("email", ""))
     e_email.grid(row=3, column=1)
-    
+
     def save_and_close():
-        settings["price"] = float(e_price.get())
+        try:
+            settings["price"] = float(e_price.get())
+        except ValueError:
+            settings["price"] = 0
+
         settings["till_number"] = e_till.get()
-        settings["record_time"] = int(e_time.get())
+
+        try:
+            settings["record_time"] = int(e_time.get())
+        except ValueError:
+            settings["record_time"] = 10
+
         settings["email"] = e_email.get()
         save_settings()
         log("Settings updated")
         win.destroy()
 
     tk.Button(win, text="Save", command=save_and_close)\
-        .grid(row=4, column=0, columnspan=2, pady=10)    
-#CREATE SESSIONS CSV IF MISSING
+        .grid(row=4, column=0, columnspan=2, pady=5)
+
+    # WhatsApp login button
+    def login_whatsapp_button():
+        threading.Thread(target=login_whatsapp, daemon=True).start()
+        messagebox.showinfo("WhatsApp", "WhatsApp Web opened. Please scan the QR code.")
+
+    tk.Button(win, text="Login WhatsApp", command=login_whatsapp_button)\
+        .grid(row=5, column=0, columnspan=2, pady=5)
+
+# ======== SESSION CSV ========
 if not os.path.exists("sessions.csv"):
     with open("sessions.csv", "w", newline="") as f:
         csv.writer(f).writerow(["timestamp", "phone_number", "duration", "price"])
 
-#SESSION FLOW
-last_payment_phone = None
+def replay_last_video():
+    video = get_last_video()  # reuse the function from share.py
+    if not video:
+        log("No recorded video to replay")
+        return
+    # Use default video player
+    subprocess.run(["xdg-open", video])
+    
+# ======== SESSION FLOW ========
+def on_session_complete(phone, amount):
+    log(f"Session completed for {phone}, amount {amount}")
+    # Send email notification
+    if not send_session_email(phone, amount):
+        log("[EMAIL] Failed to send session notification")
+
 def start_flow():
     phone = simpledialog.askstring("Payment", "Enter phone (07... or 01...):")
     if not phone:
@@ -161,7 +211,12 @@ def start_flow():
         try:
             if initiate_mpesa_payment(phone, amount):
                 threading.Thread(
-                    target=lambda: start_session(root, countdown_label, phone),
+                    target=lambda: start_session(
+                        root,
+                        countdown_label,
+                        phone,
+                        on_complete=lambda: on_session_complete(phone, amount)
+                    ),
                     daemon=True
                 ).start()
             else:
@@ -171,8 +226,25 @@ def start_flow():
 
     threading.Thread(target=pay, daemon=True).start()
 
-#MENU BAR
+# ======== SHARE VIA WHATSAPP ========
+def share_last_session():
+    client_phone = tk.simpledialog.askstring(
+        "Share via WhatsApp",
+        "Enter client WhatsApp number (2547...)"
+    )
+    if not client_phone:
+        return
 
+    client_phone = client_phone.strip()
+    if client_phone.startswith("07") or client_phone.startswith("01"):
+        client_phone = "254" + client_phone[1:]
+
+    threading.Thread(
+        target=lambda: share_via_whatsapp(client_phone, root),
+        daemon=True
+    ).start()
+
+# ======== MENU BAR ========
 menubar = tk.Menu(root)
 root.config(menu=menubar)
 
@@ -185,20 +257,21 @@ settings_menu.add_command(label="Recover Password", command=recover_password)
 settings_menu.add_separator()
 settings_menu.add_command(label="Exit", command=root.quit)
 
-#BUTTONS
-
+# ======== BUTTONS ========
 tk.Button(frame, text="Music", command=search_music)\
     .grid(row=0, column=0, padx=5)
 
 tk.Button(frame, text="Start", command=start_flow)\
     .grid(row=0, column=1, padx=5)
-    
+
 tk.Button(frame, text="Camera", command=lambda:
     threading.Thread(target=open_camera_preview, daemon=True).start()
 ).grid(row=0, column=2, padx=5)
 
-tk.Button(frame, text="Replay", command=replay_last_video)\
+tk.Button(frame, text="Replay", command=lambda: threading.Thread(target=replay_last_video, daemon=True).start())\
     .grid(row=0, column=3, padx=5)
-# START
+
+tk.Button(frame, text="Share", command=share_last_session).grid(row=0, column=4, padx=5)
+# ======== START ========
 log("System ready")
 root.mainloop()

@@ -10,3 +10,5 @@ google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=1.1.0
 pyserial>=3.6
 qrcode>=7.4
+pip install pywhatkit
+
