@@ -1,25 +1,27 @@
-# share.py
 import os
 import threading
 import time
 import traceback
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
-import tkinter as tk
+import pyautogui
+
 from logger import log
 
 VIDEO_DIR = "/home/user/Automated_Photobooth/videos"
+CHROME_PROFILE = "/home/user/.whatsapp_session"
+CHROMEDRIVER_PATH = "/usr/bin/chromedriver"
 
+
+#Helper Functions
 def get_last_video():
-    """Return the most recent .mp4 video in VIDEO_DIR"""
     if not os.path.exists(VIDEO_DIR):
         return None
-
     videos = sorted(
         [os.path.join(VIDEO_DIR, f) for f in os.listdir(VIDEO_DIR) if f.endswith(".mp4")],
         key=os.path.getmtime,
@@ -27,108 +29,121 @@ def get_last_video():
     )
     return videos[0] if videos else None
 
+
 def login_whatsapp():
-    """Open WhatsApp Web for admin login (reuse session)"""
+    """One-time WhatsApp Web login. Admin scans QR, session saved."""
     log("Opening WhatsApp Web for login...")
     chrome_options = Options()
     chrome_options.add_argument("--start-maximized")
-    chrome_options.add_argument("--user-data-dir=/home/user/.whatsapp_session")
-    service = Service("/usr/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    chrome_options.add_argument(f"--user-data-dir={CHROME_PROFILE}")
+
+    driver = webdriver.Chrome(
+        service=Service(CHROMEDRIVER_PATH),
+        options=chrome_options
+    )
     driver.get("https://web.whatsapp.com")
-    log("Admin should scan QR code if first time. Session saved for future use.")
+    log("Scan QR code if required. Session will be reused.")
     return driver
 
-def share_via_whatsapp(client_phone, root):
-    """Send last recorded video to the client WhatsApp (manual send)"""
+
+def focus_chat_box(driver):
+    """
+    Focus WhatsApp chat box, handling overlays and click interception.
+    """
+    attempts = 5
+    input_box = None
+    for i in range(attempts):
+        try:
+            input_box = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//div[@contenteditable='true' and @data-tab]")
+                )
+            )
+            # Scroll element into view
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", input_box)
+            time.sleep(0.3)
+            input_box.click()
+            time.sleep(0.5)
+            return input_box
+        except Exception:
+            log(f"Click intercepted, retrying {i+1}/{attempts}...")
+            time.sleep(1)
+
+    # PyAutoGUI fallback
+    if input_box:
+        try:
+            loc = input_box.location_once_scrolled_into_view
+            size = input_box.size
+            x = loc['x'] + size['width'] // 2
+            y = loc['y'] + size['height'] // 2
+            pyautogui.moveTo(x, y, duration=0.3)
+            pyautogui.click()
+            log("Chat box focused using PyAutoGUI fallback")
+            return input_box
+        except:
+            raise Exception("Failed to focus chat box")
+    raise Exception("Failed to locate chat box")
+
+
+#Core Share Logic
+def share_via_whatsapp(client_phone):
     video = get_last_video()
     if not video:
-        log("No recorded video available")
+        log("No video found to send")
         return
 
-    log(f"📤 Preparing WhatsApp send → {client_phone}")
+    log(f"Sending WhatsApp video")
 
     def send_thread():
         driver = None
         try:
             chrome_options = Options()
             chrome_options.add_argument("--start-maximized")
-            chrome_options.add_argument("--user-data-dir=/home/user/.whatsapp_session")
-            service = Service("/usr/bin/chromedriver")
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+            chrome_options.add_argument(f"--user-data-dir={CHROME_PROFILE}")
+
+            driver = webdriver.Chrome(
+                service=Service(CHROMEDRIVER_PATH),
+                options=chrome_options
+            )
+
+            # Open client chat
             driver.get(f"https://web.whatsapp.com/send?phone={client_phone}")
 
-            # Wait for chat input to load
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.XPATH, "//div[@contenteditable='true' and @data-tab]"))
+            # Focus chat input box safely
+            input_box = focus_chat_box(driver)
+            log("Chat loaded")
+
+            #Attach Video
+            file_input = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
             )
-            log("💬 Chat loaded")
-            time.sleep(2)  # extra buffer
+            file_input.send_keys(video)
+            log("Video attached")
 
-            # Attach video
-            for attempt in range(3):
+            #Wait for WhatsApp to prepare video
+            log("Waiting for WhatsApp to prepare video...")
+            max_wait = 20  
+            # seconds
+            start = time.time()
+            while time.time() - start < max_wait:
                 try:
-                    file_input = WebDriverWait(driver, 20).until(
-                        EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
-                    )
-                    file_input.send_keys(video)
-                    log("📎 Video attached")
+                    # Check if upload overlay / spinner is gone
+                    overlay = driver.find_elements(By.XPATH, "//div[contains(@class,'_1pJ9J')]")
+                    if not overlay:
+                        break
+                except:
                     break
-                except StaleElementReferenceException:
-                    log("⚠️ StaleElementReferenceException: retrying file input")
-                    time.sleep(1)
-            else:
-                driver.save_screenshot("whatsapp_attach_fail.png")
-                raise Exception("Failed to attach video")
+                time.sleep(0.5)
+            log("Video preview ready")
 
-            time.sleep(2)  # wait for preview
-            log("🎞️ Video preview ready")
-
-            # Manual Send Button
-            def show_send_button(driver_inner):
-                popup = tk.Toplevel(root)
-                popup.title("Send WhatsApp Video")
-                popup.geometry("300x100")
-
-                tk.Label(popup, text=f"Video ready to send to {client_phone}").pack(pady=10)
-
-                def send_now():
-                    try:
-                        send_xpaths = [
-                            "//span[@data-testid='send']",
-                            "//button[@data-icon='send']",
-                            "//div[@role='button' and @data-testid='send']"
-                        ]
-                        send_btn = None
-                        for xpath in send_xpaths:
-                            try:
-                                send_btn = WebDriverWait(driver_inner, 10).until(
-                                    EC.element_to_be_clickable((By.XPATH, xpath))
-                                )
-                                if send_btn:
-                                    break
-                            except TimeoutException:
-                                continue
-
-                        if send_btn is None:
-                            log("❌ Send button not found. Cannot send video.")
-                            return
-
-                        send_btn.click()
-                        log(f"✅ Video sent to {client_phone} successfully")
-                    except Exception as e:
-                        log(f"❌ Error sending video: {e}")
-                    finally:
-                        popup.destroy()
-
-                tk.Button(popup, text="Send Video Now", command=send_now, bg="blue", fg="white").pack(pady=5)
-
-            root.after(500, lambda: show_send_button(driver))
-
+            #Send Video
+            input_box.click()
+            time.sleep(0.3)
+            pyautogui.press("ENTER")
+            log("Video sent successfully and upload completed")
         except Exception as e:
             if driver:
-                driver.save_screenshot("whatsapp_debug.png")
-            log(f"❌ WhatsApp error: {e}\nScreenshot saved as whatsapp_debug.png\n{traceback.format_exc()}")
-        # Do not quit driver: keep WhatsApp Web session open for manual send
+                driver.save_screenshot("whatsapp_error.png")
+            log(f"WhatsApp error: {e}\nScreenshot saved as whatsapp_error.png\n{traceback.format_exc()}")
 
     threading.Thread(target=send_thread, daemon=True).start()
